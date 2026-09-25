@@ -1,0 +1,26 @@
+# Secrets and environment files
+.env
+.env.*
+!.env.example
+
+# n8n/local data
+.n8n/
+*.db
+*.sqlite
+*.sqlite3
+
+# Backups and exports containing runtime data
+*.dump
+*.bak
+backups/
+backup/
+exports/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
