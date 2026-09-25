@@ -1,0 +1,718 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "5f29beab-0e95-4fbb-ae6e-a1236efc7675",
+      "name": "Google Gemini Chat Model1"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "vulnerability-scan",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -864,
+        -544
+      ],
+      "id": "7c16f3b1-3c36-4172-a6de-76d1dac4d7e3",
+      "name": "Receive Nmap Scan"
+    },
+    {
+      "parameters": {
+        "jsCode": "const nmapItems = $(\"Extract CVE IDs\").all();\n\nreturn items.map(item => {\n  const data = item.json;\n\n  const cve = data.vulnerabilities?.[0]?.cve;\n\n  if (!cve) {\n    return {\n      json: {\n        error: \"No CVE data found\"\n      }\n    };\n  }\n\n  // Find the ORIGINAL Nmap finding that produced this CVE\n  const nmapItem = nmapItems.find(item =>\n    item.json.cveId === cve.id\n  );\n\n  const nmap = nmapItem?.json || {};\n\n  // -------------------------\n  // Get CVSS data\n  // -------------------------\n\n  const metric =\n    cve.metrics?.cvssMetricV31?.[0] ||\n    cve.metrics?.cvssMetricV30?.[0] ||\n    cve.metrics?.cvssMetricV2?.[0];\n\n  const cvssData = metric?.cvssData;\n\n  // -------------------------\n  // Normalize severity\n  // -------------------------\n\n  let severity = metric?.baseSeverity || null;\n\n  if (!severity && cvssData?.baseScore != null) {\n    const score = Number(cvssData.baseScore);\n\n    if (score >= 9.0) {\n      severity = \"CRITICAL\";\n    } else if (score >= 7.0) {\n      severity = \"HIGH\";\n    } else if (score >= 4.0) {\n      severity = \"MEDIUM\";\n    } else if (score > 0) {\n      severity = \"LOW\";\n    } else {\n      severity = \"NONE\";\n    }\n  }\n\n  // -------------------------\n  // Description\n  // -------------------------\n\n  const description =\n    cve.descriptions?.find(d => d.lang === \"en\")?.value ||\n    cve.descriptions?.[0]?.value ||\n    null;\n\n  // -------------------------\n  // CWE\n  // -------------------------\n\n  const cwe =\n    cve.weaknesses?.[0]?.description\n      ?.find(d => d.lang === \"en\")?.value ||\n    null;\n\n  // -------------------------\n  // Final combined object\n  // -------------------------\n\n  return {\n    json: {\n\n      // =========================\n      // NMAP CONTEXT\n      // =========================\n\n      host: nmap.ip ?? null,\n      port: nmap.port ?? null,\n      protocol: nmap.protocol ?? null,\n      service: nmap.service ?? null,\n      product: nmap.product ?? null,\n      version: nmap.version ?? null,\n      scriptId: nmap.scriptId ?? null,\n      finding: nmap.finding ?? null,\n\n      // =========================\n      // CVE INFORMATION\n      // =========================\n\n      cveId: cve.id,\n\n      description,\n\n      published: cve.published,\n\n      lastModified: cve.lastModified,\n\n      // =========================\n      // CVSS\n      // =========================\n\n      cvss: cvssData\n        ? {\n            version: cvssData.version,\n            score: cvssData.baseScore,\n            severity,\n            vector: cvssData.vectorString\n          }\n        : null,\n\n      // =========================\n      // CWE\n      // =========================\n\n      cwe\n\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        -320
+      ],
+      "id": "bb4fb37a-ab30-45d8-92a4-bf3d0a93cdc3",
+      "name": "Combine Nmap + NVD CVE Data"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Analyze this vulnerability finding:\n\n{{ JSON.stringify($json) }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a cybersecurity vulnerability risk analyst.\n\nYour job is to analyze a vulnerability finding using BOTH the Nmap evidence and the official NVD/CVE information provided in the user message.\n\nDo not blindly trust the CVSS score. Determine whether the CVE is actually applicable to the detected host/service based on the available evidence.\n\nIMPORTANT:\n\n* Distinguish between CONFIRMED and UNCONFIRMED vulnerabilities.\n* A CVE appearing in an Nmap vulnerability script does NOT automatically mean the host is vulnerable.\n* If the Nmap script failed to negotiate, returned an error, or did not provide evidence confirming the affected product/version, do not claim that the vulnerability is confirmed.\n* Consider the detected port, protocol, service, product, version, script ID, and finding.\n* Compare the detected product/version against the affected versions described in the CVE.\n* If the detected service is clearly unrelated to the affected product, mark the vulnerability as Not Applicable when justified.\n* If there is insufficient evidence, mark it as Unconfirmed or Potentially Applicable rather than claiming exploitation is confirmed.\n* CVSS severity describes the CVE itself, not necessarily the risk to this specific host.\n* Risk level should reflect the vulnerability's relevance to this specific host as well as its technical severity.\n\nAnalyze the following:\n\n1. Risk level:\n   Critical, High, Medium, or Low.\n\n2. Status:\n   Confirmed, Potentially Applicable, Unconfirmed, or Not Applicable.\n\n3. Exploitability:\n   Explain how the vulnerability could potentially be exploited against this host/service.\n\n4. Potential impact:\n   Explain the realistic security impact if the vulnerability applies.\n\n5. Host relevance:\n   Explain why the vulnerability is or is not relevant to the detected host, port, service, product, and version.\n\n6. Remediation:\n   Give specific practical remediation steps.\n\n7. Priority:\n   Immediate, High, Medium, or Low.\n\n8. Confidence:\n   High, Medium, or Low.\n\n9. Summary:\n   Give a concise security assessment explaining the reasoning behind the classification.\n\nReturn ONLY valid JSON matching the required output schema.\nDo not add markdown.\nDo not add explanations outside the JSON.\nThe input contains Nmap context and NVD/CVE information.\n\nYour output MUST preserve ALL of the following input fields exactly:\nhost\nport\nprotocol\nservice\nproduct\nversion\nscriptId\nfinding\ncveId\ndescription\npublished\nlastModified\ncvss\ncwe\n\nThen add your analysis fields:\nrisk_level\nstatus\nexploitability\npotential_impact\nhost_relevance\nremediation\npriority\nconfidence\nsummary\n\nDo not remove, rename, or modify the original Nmap/NVD fields."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -96,
+        -304
+      ],
+      "id": "cc6323d5-4e24-440e-a093-ec856e6e98c0",
+      "name": "AI Vulnerability Risk Analyst",
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\n  \"host\": \"string\",\n  \"port\": \"string or null\",\n  \"protocol\": \"string or null\",\n  \"service\": \"string or null\",\n  \"product\": \"string or null\",\n  \"version\": \"string or null\",\n  \"scriptId\": \"string or null\",\n  \"finding\": \"string or null\",\n  \"cveId\": \"string\",\n  \"description\": \"string\",\n  \"published\": \"string\",\n  \"lastModified\": \"string\",\n  \"cvss\": {\n    \"version\": \"string\",\n    \"score\": \"number\",\n    \"severity\": \"string\",\n    \"vector\": \"string\"\n  },\n  \"cwe\": \"string or null\",\n  \"risk_level\": \"string\",\n  \"status\": \"string\",\n  \"exploitability\": \"string\",\n  \"potential_impact\": \"string\",\n  \"host_relevance\": \"string\",\n  \"remediation\": [\n    \"string\"\n  ],\n  \"priority\": \"string\",\n  \"confidence\": \"string\",\n  \"summary\": \"string\"\n}",
+        "autoFix": true
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        64,
+        -128
+      ],
+      "id": "4757b06d-9255-4e02-abc0-5fb3646fd04f",
+      "name": "Vulnerability Analysis Schema"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nconst priorityScore = {\n  \"Immediate\": 4,\n  \"High\": 3,\n  \"Medium\": 2,\n  \"Low\": 1\n};\n\nconst riskScore = {\n  \"Critical\": 4,\n  \"High\": 3,\n  \"Medium\": 2,\n  \"Low\": 1\n};\n\n// ------------------------------------\n// 1. Normalize all vulnerability items\n// ------------------------------------\n\nconst findings = items.map(item => {\n  const data = item.json;\n  const analysis = data.output || data;\n\n  return {\n    host: analysis.host ?? data.host ?? null,\n    port: analysis.port ?? data.port ?? null,\n    protocol: analysis.protocol ?? data.protocol ?? null,\n    service: analysis.service ?? data.service ?? null,\n    product: analysis.product ?? data.product ?? null,\n    version: analysis.version ?? data.version ?? null,\n\n    scriptId: analysis.scriptId ?? data.scriptId ?? null,\n    finding: analysis.finding ?? data.finding ?? null,\n\n    cveId: analysis.cveId ?? data.cveId ?? null,\n    description: analysis.description ?? data.description ?? null,\n    published: analysis.published ?? data.published ?? null,\n    lastModified: analysis.lastModified ?? data.lastModified ?? null,\n\n    cvss: analysis.cvss ?? data.cvss ?? null,\n    cwe: analysis.cwe ?? data.cwe ?? null,\n\n    riskLevel: analysis.risk_level ?? null,\n    status: analysis.status ?? null,\n    exploitability: analysis.exploitability ?? null,\n    potentialImpact: analysis.potential_impact ?? null,\n    hostRelevance: analysis.host_relevance ?? null,\n\n    remediation: Array.isArray(analysis.remediation)\n      ? analysis.remediation\n      : [],\n\n    priority: analysis.priority ?? null,\n    confidence: analysis.confidence ?? null,\n    summary: analysis.summary ?? null\n  };\n});\n\n// ------------------------------------\n// 2. Add prioritization scores\n// ------------------------------------\n\nfor (const finding of findings) {\n  finding.priorityScore =\n    priorityScore[finding.priority] ?? 0;\n\n  finding.riskScore =\n    riskScore[finding.riskLevel] ?? 0;\n}\n\n// ------------------------------------\n// 3. Sort highest priority first\n// ------------------------------------\n\nfindings.sort((a, b) => {\n  if (b.priorityScore !== a.priorityScore) {\n    return b.priorityScore - a.priorityScore;\n  }\n\n  return b.riskScore - a.riskScore;\n});\n\n// ------------------------------------\n// 4. Calculate report statistics\n// ------------------------------------\n\nconst counts = {\n  critical: 0,\n  high: 0,\n  medium: 0,\n  low: 0\n};\n\nfor (const finding of findings) {\n  const risk = (finding.riskLevel || \"\").toLowerCase();\n\n  if (risk === \"critical\") counts.critical++;\n  else if (risk === \"high\") counts.high++;\n  else if (risk === \"medium\") counts.medium++;\n  else if (risk === \"low\") counts.low++;\n}\n\n// ------------------------------------\n// 5. Determine overall risk\n// ------------------------------------\n\nlet overallRisk = \"Low\";\n\nif (counts.critical > 0) {\n  overallRisk = \"Critical\";\n} else if (counts.high > 0) {\n  overallRisk = \"High\";\n} else if (counts.medium > 0) {\n  overallRisk = \"Medium\";\n}\n\n// ------------------------------------\n// 6. Report metadata\n// ------------------------------------\n\nconst host =\n  findings.length > 0\n    ? findings[0].host\n    : null;\n\nconst report = {\n  scanTarget: host,\n\n  generatedAt: new Date().toISOString(),\n\n  overallRisk,\n\n  statistics: {\n    totalFindings: findings.length,\n    critical: counts.critical,\n    high: counts.high,\n    medium: counts.medium,\n    low: counts.low\n  },\n\n  findings\n};\n\n// ------------------------------------\n// 7. Return final report\n// ------------------------------------\n\nreturn [\n  {\n    json: report\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        -304
+      ],
+      "id": "b15dfd53-3307-4290-9c2b-2b203b2870fe",
+      "name": "Prioritize & Build Security Report Data"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Generate a professional cybersecurity vulnerability assessment report from the following already-analyzed scan data.\n\nThe data has already been processed by the vulnerability analysis stage and the prioritization/report-building Code node.\n\nDo NOT perform another vulnerability analysis.\n\nUse the supplied risk levels, statuses, priorities, confidence levels, evidence, remediation, statistics, and overall risk exactly as provided.\n\nPreserve every finding and present the information clearly for a professional security report.\n\nHere is the analyzed scan data:\n\n{{ JSON.stringify($json) }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a professional cybersecurity vulnerability report generator.\n\nYour job is to transform the already-analyzed vulnerability scan data provided by the user into a clear, accurate, professional security assessment report.\n\nIMPORTANT:\n\n1. Do NOT perform a new vulnerability analysis.\n2. Do NOT change, override, or reinterpret the risk_level, status, priority, confidence, or other security classifications produced by the previous analysis.\n3. Treat the findings provided by the user as the authoritative analysis.\n4. Do not invent missing technical information.\n5. Do not claim that an unconfirmed vulnerability is confirmed.\n6. Preserve the distinction between:\n   - CVE severity\n   - Host-specific risk\n   - Vulnerability status\n   - Confidence\n7. If a finding is Unconfirmed or Potentially Applicable, clearly state that it has not been verified.\n8. If a finding is Not Applicable, clearly explain why based on the supplied evidence.\n9. If a finding is Confirmed, clearly explain the evidence supporting the finding.\n10. Use the remediation recommendations supplied in the findings. You may organize or clarify them, but do not invent unsupported remediation requirements.\n11. Do not fabricate exploit evidence, software versions, operating systems, attack paths, or affected services.\n12. The report must be understandable to both technical and non-technical readers.\n13. Use professional cybersecurity terminology.\n14. Prioritize findings according to the priority and risk information already calculated in the input.\n15. The overall risk supplied by the previous processing stage must be preserved.\n\nREPORT STRUCTURE:\n\nGenerate the report with these sections:\n\n1. Executive Summary\n   - Briefly explain what was scanned.\n   - State the overall risk.\n   - Summarize the most important security observations.\n   - Clearly mention if findings remain unconfirmed.\n\n2. Scan Information\n   - Scan target\n   - Number of findings\n   - Overall risk\n   - Scan/report generation time when available\n\n3. Risk Summary\n   - Total findings\n   - Critical findings\n   - High findings\n   - Medium findings\n   - Low findings\n   - Explain the overall risk classification.\n\n4. Detailed Findings\n   For every finding, include:\n   - Finding title\n   - Host\n   - Port\n   - Protocol\n   - Service\n   - Product\n   - Version\n   - CVE\n   - CVSS\n   - CWE\n   - Risk level\n   - Status\n   - Priority\n   - Confidence\n   - Technical finding/evidence\n   - Exploitability\n   - Potential impact\n   - Host relevance\n   - Remediation\n\n5. Recommendations\n   - Summarize the most important remediation actions across all findings.\n   - Prioritize urgent actions first.\n\n6. Conclusion\n   - Give a concise overall assessment.\n   - Do not introduce new security claims.\n\nOUTPUT RULES:\n\nReturn ONLY the structured JSON requested by the Structured Output Parser.\n\nDo not return Markdown.\nDo not use code fences.\nDo not add commentary outside the JSON.\nDo not omit required fields.\n\nThe input may contain multiple vulnerability findings. Include every finding in the final report.\n\nCVSS FORMAT:\n\nFor every finding, preserve CVSS as an object with exactly these fields:\n\n{\n  \"version\": \"string or null\",\n  \"score\": \"number or null\",\n  \"severity\": \"string or null\",\n  \"vector\": \"string or null\"\n}\n\nDo not convert the CVSS object into a string.\n\nNUMBER FORMAT:\n\nThe following fields must remain JSON numbers, not strings:\n\nscan_information.total_findings\nrisk_summary.critical\nrisk_summary.high\nrisk_summary.medium\nrisk_summary.low\n\nDo not quote numeric values.\n\nReturn valid JSON only.\nThe title should follow this format:\n\nVulnerability Assessment Report - <scan target>\n\nUse the scan_target supplied in the input.\nDo not invent a different target.\n\nFINAL FORMAT REQUIREMENTS:\n\nReturn exactly one JSON object.\n\nDo not wrap the JSON in markdown code fences.\n\nDo not write anything before or after the JSON.\n\nThe response must contain these top-level fields exactly:\n\ntitle\nexecutive_summary\nscan_information\nrisk_summary\ndetailed_findings\nrecommendations\nconclusion\n\nscan_information.total_findings must be a JSON number.\n\nrisk_summary.critical must be a JSON number.\nrisk_summary.high must be a JSON number.\nrisk_summary.medium must be a JSON number.\nrisk_summary.low must be a JSON number.\n\nFor each detailed finding, cvss must be an object containing:\n\nversion\nscore\nseverity\nvector\n\ncvss.score must be a JSON number.\n\nDo not convert cvss into a string.\n\nInclude every finding from the input."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        496,
+        -304
+      ],
+      "id": "d82d66cf-893d-489f-8e08-98af6e9f934b",
+      "name": "AI Security Report Generator",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\n  \"title\": \"Vulnerability Assessment Report\",\n  \"executive_summary\": \"string\",\n  \"scan_information\": {\n    \"scan_target\": \"string\",\n    \"generated_at\": \"string\",\n    \"overall_risk\": \"string\",\n    \"total_findings\": 1\n  },\n  \"risk_summary\": {\n    \"critical\": 0,\n    \"high\": 0,\n    \"medium\": 0,\n    \"low\": 1,\n    \"summary\": \"string\"\n  },\n  \"detailed_findings\": [\n    {\n      \"title\": \"string\",\n      \"host\": \"string\",\n      \"port\": \"string\",\n      \"protocol\": \"string\",\n      \"service\": \"string\",\n      \"product\": \"string\",\n      \"version\": \"string\",\n      \"cve_id\": \"string\",\n      \"cvss\": {\n        \"version\": \"string\",\n        \"score\": 7.5,\n        \"severity\": \"string\",\n        \"vector\": \"string\"\n      },\n      \"cwe\": \"string\",\n      \"risk_level\": \"string\",\n      \"status\": \"string\",\n      \"priority\": \"string\",\n      \"confidence\": \"string\",\n      \"technical_evidence\": \"string\",\n      \"exploitability\": \"string\",\n      \"potential_impact\": \"string\",\n      \"host_relevance\": \"string\",\n      \"remediation\": [\n        \"string\"\n      ],\n      \"summary\": \"string\"\n    }\n  ],\n  \"recommendations\": [\n    \"string\"\n  ],\n  \"conclusion\": \"string\"\n}",
+        "autoFix": true
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        688,
+        -64
+      ],
+      "id": "1bead779-c5e1-4205-8c7c-0e8309d9cc8e",
+      "name": "Security Report Schema",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "file",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -640,
+        -560
+      ],
+      "id": "2f1f186f-d31e-4271-a93f-67cd859695f2",
+      "name": "Extract Nmap XML Data"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.xml",
+      "typeVersion": 1,
+      "position": [
+        -416,
+        -544
+      ],
+      "id": "a3edb8ea-1552-4d5b-9e0a-af28b0017886",
+      "name": "Parse Nmap XML"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst nmap = data.nmaprun;\n\nconst host = Array.isArray(nmap.host) ? nmap.host[0] : nmap.host;\n\nif (!host) {\n  throw new Error(\"No host found in Nmap output\");\n}\n\nconst toArray = (value) => {\n  if (!value) return [];\n  return Array.isArray(value) ? value : [value];\n};\n\nconst ip = host.address?.addr ?? null;\nconst ports = toArray(host.ports?.port);\n\nconst results = [];\n\n// -------------------------\n// 1. Extract open ports\n// -------------------------\n\nfor (const port of ports) {\n  results.push({\n    json: {\n      type: \"port\",\n      ip,\n      protocol: port.protocol ?? null,\n      port: port.portid ?? null,\n      state: port.state?.state ?? null,\n      service: port.service?.name ?? null,\n      product: port.service?.product ?? null,\n      version: port.service?.version ?? null\n    }\n  });\n}\n\n// -------------------------\n// 2. Extract host vulnerability scripts\n// -------------------------\n\nconst hostScripts = toArray(host.hostscript?.script);\n\nfor (const script of hostScripts) {\n\n  // Try to identify which service the vulnerability belongs to\n  const scriptText = `${script.id ?? \"\"} ${script.output ?? \"\"}`.toLowerCase();\n\n  let matchingPort = null;\n\n  // Look for a port whose service/product appears in the script\n  for (const port of ports) {\n    const service = (port.service?.name ?? \"\").toLowerCase();\n    const product = (port.service?.product ?? \"\").toLowerCase();\n\n    if (\n      (service && scriptText.includes(service)) ||\n      (product && scriptText.includes(product))\n    ) {\n      matchingPort = port;\n      break;\n    }\n  }\n\n  // Special handling for Samba/SMB vulnerabilities\n  if (!matchingPort && (\n    scriptText.includes(\"samba\") ||\n    scriptText.includes(\"smb\")\n  )) {\n    matchingPort = ports.find(port =>\n      [\"445\", \"139\"].includes(String(port.portid))\n    ) ?? null;\n  }\n\n  results.push({\n    json: {\n      type: \"vulnerability_check\",\n      ip,\n\n      protocol: matchingPort?.protocol ?? null,\n      port: matchingPort?.portid ?? null,\n      state: matchingPort?.state?.state ?? null,\n\n      service: matchingPort?.service?.name ?? null,\n      product: matchingPort?.service?.product ?? null,\n      version: matchingPort?.service?.version ?? null,\n\n      scriptId: script.id ?? null,\n      output: script.output ?? null\n    }\n  });\n}\n\n// -------------------------\n// 3. Extract scripts attached to ports\n// -------------------------\n\nfor (const port of ports) {\n  const scripts = toArray(port.script);\n\n  for (const script of scripts) {\n    results.push({\n      json: {\n        type: \"vulnerability_check\",\n\n        ip,\n        protocol: port.protocol ?? null,\n        port: port.portid ?? null,\n        state: port.state?.state ?? null,\n\n        service: port.service?.name ?? null,\n        product: port.service?.product ?? null,\n        version: port.service?.version ?? null,\n\n        scriptId: script.id ?? null,\n        output: script.output ?? null\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -192,
+        -544
+      ],
+      "id": "69da7bab-0a26-400e-a681-f83c8199b5ef",
+      "name": "Extract Ports & Vulnerability Scripts"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "98012e3b-a787-44ce-9e08-c705011f10d5",
+              "name": "ip",
+              "value": "={{ $json.ip }}",
+              "type": "string"
+            },
+            {
+              "id": "8d17deba-664b-4e4b-9227-982c1e442058",
+              "name": "protocol",
+              "value": "={{ $json.protocol }}",
+              "type": "string"
+            },
+            {
+              "id": "3d5c846a-b7f8-46a5-a32e-93b3e61bd881",
+              "name": "port",
+              "value": "={{ $json.port }}",
+              "type": "string"
+            },
+            {
+              "id": "87003222-f4c4-4176-b6cc-f2e672a4e3e4",
+              "name": "state",
+              "value": "={{ $json.state }}",
+              "type": "string"
+            },
+            {
+              "id": "48915069-cc76-4bfe-bba7-c0deede55e12",
+              "name": "service",
+              "value": "={{ $json.service }}",
+              "type": "string"
+            },
+            {
+              "id": "0dde079e-145e-48ea-8ba8-f661d9d3e18f",
+              "name": "product",
+              "value": "={{ $json.product }}",
+              "type": "string"
+            },
+            {
+              "id": "7accd418-6cdb-4ea4-87df-a93fa9a640c3",
+              "name": "version",
+              "value": "={{ $json.version }}",
+              "type": "string"
+            },
+            {
+              "id": "02b67e0a-d89a-45f0-913b-4e20377186c0",
+              "name": "scriptId",
+              "value": "={{ $json.scriptId }}",
+              "type": "string"
+            },
+            {
+              "id": "1c911bc9-8cc9-4962-aed0-a5df85703862",
+              "name": "output",
+              "value": "={{ $json.output }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        32,
+        -544
+      ],
+      "id": "f89b6ab1-8d51-46c5-a62b-a8e28d1263a0",
+      "name": "Normalize Scan Data"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b4a11e6d-58b5-43e8-b534-293afe99cfec",
+              "leftValue": "={{ $json.scriptId }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        256,
+        -544
+      ],
+      "id": "01230aae-7bfd-4f03-bd38-394463c7381b",
+      "name": "Check for Vulnerability Scripts"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nconst findings = [];\n\nfor (const item of items) {\n  const data = item.json;\n\n  const scriptId = data.scriptId || \"\";\n  const output = data.output || \"\";\n\n  // Ignore confirmed negative vulnerability checks\n  if (\n    output.toLowerCase() === \"false\" ||\n    output.toLowerCase().includes(\"couldn't find any\") ||\n    output.toLowerCase().includes(\"no vulnerabilities\")\n  ) {\n    continue;\n  }\n\n  findings.push({\n    json: {\n      ip: data.ip,\n      port: data.port || null,\n      protocol: data.protocol || null,\n      service: data.service || null,\n      scriptId,\n      finding: output\n    }\n  });\n}\n\nreturn findings;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        -544
+      ],
+      "id": "8a996d81-de67-4996-afee-bbc8bbe603b7",
+      "name": "Filter Valid Vulnerability Findings"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "98568f08-efce-4132-a7b2-0a2528cc146c",
+              "name": "ip",
+              "value": "={{ $json.ip }}",
+              "type": "string"
+            },
+            {
+              "id": "1e411e12-1184-4446-8c79-92e7b57438e0",
+              "name": "port",
+              "value": "={{ $json.port }}",
+              "type": "string"
+            },
+            {
+              "id": "85770c32-42e4-4640-9386-ba0313232213",
+              "name": "protocol",
+              "value": "={{ $json.protocol }}",
+              "type": "string"
+            },
+            {
+              "id": "043cc0cd-c408-48e5-a7ac-aa0ccd117d3e",
+              "name": "service",
+              "value": "={{ $json.service }}",
+              "type": "string"
+            },
+            {
+              "id": "e3f8e39a-98cf-4b8b-9890-b78857255c30",
+              "name": "scriptId",
+              "value": "={{ $json.scriptId }}",
+              "type": "string"
+            },
+            {
+              "id": "05d1dda0-71e3-4011-b5ae-cd7194246b04",
+              "name": "finding",
+              "value": "={{ $json.finding }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        704,
+        -544
+      ],
+      "id": "3412adea-a4b6-4b14-9648-fd300265e66f",
+      "name": "Prepare Vulnerability Data"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nreturn items.map(item => {\n  const data = item.json;\n\n  const scriptId = data.scriptId || \"\";\n  const finding = data.finding || \"\";\n\n  // Look for a CVE directly in the script ID or finding\n  const cveMatch = `${scriptId} ${finding}`.match(/CVE-\\d{4}-\\d{4,7}/i);\n\n  return {\n    json: {\n      ...data,\n      cveId: cveMatch ? cveMatch[0].toUpperCase() : null\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        928,
+        -544
+      ],
+      "id": "b7a3c645-19a5-4f88-b487-300cea9a1fb4",
+      "name": "Extract CVE IDs"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "206a5b17-401d-40f6-be47-e4735933b4ba",
+              "leftValue": "={{ $json.cveId }}",
+              "rightValue": "=",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -880,
+        -336
+      ],
+      "id": "2939b3ee-fa50-4889-ac51-6e114fd5a2ad",
+      "name": "Check for CVE ID"
+    },
+    {
+      "parameters": {
+        "url": "https://services.nvd.nist.gov/rest/json/cves/2.0",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "cveid",
+              "value": "={{ $json.cveId }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -592,
+        -336
+      ],
+      "id": "433a15a0-52e2-42b0-8ec5-c2bc759b277c",
+      "name": "Fetch CVE Data from NVD"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        -240,
+        -96
+      ],
+      "id": "bcbf7a2a-7dea-40eb-87ef-5197df6182d3",
+      "name": "Gemini – Risk Analysis Model"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        416,
+        96
+      ],
+      "id": "1394df5e-11f7-4f47-bdcb-faf4593b8433",
+      "name": "Gemini – Report Generation Model"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.output }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        864,
+        -304
+      ],
+      "id": "bf71967a-2de3-45d6-839a-e349119c7cb0",
+      "name": "Return Security Assessment Report"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        624,
+        144
+      ],
+      "id": "18d48c08-f75d-4731-8a7d-f3f3c9d6de8f",
+      "name": "Groq Chat Model"
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        352,
+        -96
+      ],
+      "id": "a1a6226f-7496-4412-ad7f-96305a13f59c",
+      "name": "Groq Chat Model1"
+    }
+  ],
+  "connections": {
+    "Google Gemini Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Vulnerability Analysis Schema",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Receive Nmap Scan": {
+      "main": [
+        [
+          {
+            "node": "Extract Nmap XML Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Nmap + NVD CVE Data": {
+      "main": [
+        [
+          {
+            "node": "AI Vulnerability Risk Analyst",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Vulnerability Risk Analyst": {
+      "main": [
+        [
+          {
+            "node": "Prioritize & Build Security Report Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vulnerability Analysis Schema": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI Vulnerability Risk Analyst",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prioritize & Build Security Report Data": {
+      "main": [
+        [
+          {
+            "node": "AI Security Report Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Security Report Generator": {
+      "main": [
+        [
+          {
+            "node": "Return Security Assessment Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Security Report Schema": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI Security Report Generator",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Nmap XML Data": {
+      "main": [
+        [
+          {
+            "node": "Parse Nmap XML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Nmap XML": {
+      "main": [
+        [
+          {
+            "node": "Extract Ports & Vulnerability Scripts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Ports & Vulnerability Scripts": {
+      "main": [
+        [
+          {
+            "node": "Normalize Scan Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Scan Data": {
+      "main": [
+        [
+          {
+            "node": "Check for Vulnerability Scripts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check for Vulnerability Scripts": {
+      "main": [
+        [
+          {
+            "node": "Filter Valid Vulnerability Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Valid Vulnerability Findings": {
+      "main": [
+        [
+          {
+            "node": "Prepare Vulnerability Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Vulnerability Data": {
+      "main": [
+        [
+          {
+            "node": "Extract CVE IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract CVE IDs": {
+      "main": [
+        [
+          {
+            "node": "Check for CVE ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check for CVE ID": {
+      "main": [
+        [
+          {
+            "node": "Fetch CVE Data from NVD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch CVE Data from NVD": {
+      "main": [
+        [
+          {
+            "node": "Combine Nmap + NVD CVE Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini – Risk Analysis Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Vulnerability Risk Analyst",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini – Report Generation Model": {
+      "ai_languageModel": [
+        []
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Security Report Schema",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Security Report Generator",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
